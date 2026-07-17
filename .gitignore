@@ -1,0 +1,24 @@
+# Simulation and Vivado outputs
+artifacts/
+*.wdb
+*.jou
+*.log
+*.pb
+xsim.dir/
+work/
+
+# OpenROAD-flow-scripts outputs
+logs/
+objects/
+reports/
+results/
+
+# Vivado generated files
+.Xil/
+*.dcp
+*.rpt
+
+# Editor and Python cache
+.vscode/
+__pycache__/
+*.pyc
