@@ -1,14 +1,15 @@
 # Standalone ASAP7/TC proxy-PPA configuration for the MELON Vector Unit.
+ATTACC_RTL_HOME              := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 export PLATFORM                = asap7
 export CORNER                  = TC
 export DESIGN_NAME             = melon_vector_unit
-export DESIGN_NICKNAME         = melon_vector_unit_666mhz_fp16parallel_r6
+export DESIGN_NICKNAME         = melon_vector_unit_666mhz_fp16parallel_r9_headpipe
 export VERILOG_FILES           = \
-  $(abspath rtl/attacc_fp16_pkg.sv) \
-  $(abspath rtl/attacc_fp16_operators.sv) \
-  $(abspath rtl/melon_vector_unit.sv)
-export SDC_FILE                = $(abspath openroad/constraint_vector_unit_666mhz.sdc)
-export PRE_FLOORPLAN_TCL       = $(abspath openroad/power_activity.tcl)
+  $(ATTACC_RTL_HOME)/rtl/attacc_fp16_pkg.sv \
+  $(ATTACC_RTL_HOME)/rtl/attacc_fp16_operators.sv \
+  $(ATTACC_RTL_HOME)/rtl/melon_vector_unit.sv
+export SDC_FILE                = $(ATTACC_RTL_HOME)/openroad/constraint_vector_unit_666mhz.sdc
+export PRE_FLOORPLAN_TCL       = $(ATTACC_RTL_HOME)/openroad/power_activity.tcl
 export SYNTH_HDL_FRONTEND      = slang
 export VERILOG_DEFINES         = -D OPENROAD_CLKGATE
 # Resource sharing must remain enabled for this 16-lane hierarchical design:

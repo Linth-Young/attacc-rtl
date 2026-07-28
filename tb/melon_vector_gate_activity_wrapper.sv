@@ -1,6 +1,6 @@
-// Continuous online-softmax tile traffic for mapped-netlist activity.
-// tile_valid is qualified by tile_ready, accurately preserving the Vector
-// Unit's eight-stage inter-tile state dependency.
+// Continuous cross-head online-softmax traffic for mapped-netlist activity.
+// The 32 heads are issued round-robin.  The recurrence latency is covered by
+// the other heads, so this trace measures the intended one-tile/cycle mode.
 module melon_vector_gate_activity_wrapper (
   input wire clk,
   input wire rst_n,
@@ -10,9 +10,10 @@ module melon_vector_gate_activity_wrapper (
   localparam integer TILES = 128;
   reg [7:0] tile_index;
   wire tile_ready, tile_ack, weight_valid, sequence_done;
+  wire [4:0] ack_head_id, weight_head_id;
   wire running = (tile_index < TILES);
   wire tile_valid = running && tile_ready;
-  wire state_reset = (tile_index == 0) && tile_ready;
+  wire state_reset = 1'b0;
   wire tile_last = (tile_index[3:0] == 4'hf);
   wire [255:0] score_data;
   wire [15:0] bank_rescale, normalizer_recip, state_max_out, state_sum_out;
@@ -57,10 +58,14 @@ module melon_vector_gate_activity_wrapper (
 
   melon_vector_unit dut (
     .clk(clk), .rst_n(rst_n), .state_reset(state_reset),
-    .tile_valid(tile_valid), .tile_last(tile_last), .score_data(score_data),
-    .tile_ready(tile_ready), .tile_ack(tile_ack), .bank_rescale(bank_rescale),
+    .tile_valid(tile_valid), .tile_last(tile_last),
+    .tile_head_id(tile_index[4:0]),
+    .tile_state_reset(tile_index < 32), .score_data(score_data),
+    .tile_ready(tile_ready), .tile_ack(tile_ack), .ack_head_id(ack_head_id),
+    .bank_rescale(bank_rescale),
     .normalizer_recip(normalizer_recip), .weight_data(weight_data),
-    .weight_valid(weight_valid), .sequence_done(sequence_done),
+    .weight_valid(weight_valid), .weight_head_id(weight_head_id),
+    .sequence_done(sequence_done),
     .state_max_out(state_max_out), .state_sum_out(state_sum_out),
     .activation_valid(1'b0), .activation_ready(), .activation_silu(1'b0),
     .activation_data('0), .activation_ack(), .activation_out_valid(),
@@ -70,5 +75,6 @@ module melon_vector_gate_activity_wrapper (
   assign activity_observe = state_max_out ^ state_sum_out ^ bank_rescale ^
                             normalizer_recip ^ {{15{1'b0}}, tile_ack} ^
                             {{15{1'b0}}, weight_valid} ^ weight_data[15:0] ^
-                            weight_data[255:240];
+                            weight_data[255:240] ^ {{11{1'b0}}, ack_head_id} ^
+                            {{11{1'b0}}, weight_head_id};
 endmodule

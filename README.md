@@ -2,7 +2,7 @@
 
 本仓库是对论文 [*AttAcc! Unleashing the Power of PIM for Batched Transformer-based Generative Model Inference*（ASPLOS 2024）](https://dl.acm.org/doi/10.1145/3620665.3640422) Section 5.1 中 **bank-level GemV unit** 的可综合 SystemVerilog 架构级复现。
 
-它实现一个 bank 内的 FP16 GemV 数据通路、向量双缓冲和流式命令控制；另提供 HPCA 投稿稿件中 Base Die 的 Accumulation Unit 和轻量 online-softmax Vector Unit。它不包含 HBM3 命令控制器、DRAM 时序或完整 Transformer 推理系统，也不是论文作者发布的原始 RTL。
+它实现一个 bank 内的 FP16 GemV 数据通路、向量双缓冲和流式命令控制；另提供 HPCA 投稿稿件中 Base Die 的 Accumulation Unit 和带 per-head state table 的 online-softmax Vector Unit。它不包含 HBM3 命令控制器、DRAM 时序或完整 Transformer 推理系统，也不是论文作者发布的原始 RTL。
 
 ## 当前实现概览
 
@@ -180,11 +180,11 @@ podman run --rm --userns=keep-id \
 | --- | --- | ---: | ---: | ---: | --- |
 | Bank GEMV | FP16, 16× mul, 16× add, 4 accumulator slots | 9,106 / 9,210.74 | 666.7 MHz | 9.71–10.54 / context command‡ | setup +187.32 ps; hold −10.38 ps† |
 | Pseudo-channel Accumulation | FP16 16-lane collector, 4 slots, 4-stage add | 2,974.44 / 3,097.39 | 666.7 MHz | 7.11 / partial update‡ | setup +166.24 ps; setup/hold TNS=0 |
-| Base-Die Vector | 16-lane FP16 softmax + ReLU/SiLU, parallel pipelines | 7,906.98 / 7,911 | 666.7 MHz | 129.28 / softmax tile; 32.81 / SiLU vector; 2.34 / ReLU vector | setup +685.80 ps; setup/hold TNS=0 |
+| Base-Die Vector | 16-lane FP16 softmax + ReLU/SiLU, 32-head tagged II=1 pipeline | 10,153.25 / 10,598 | 666.7 MHz | 34.23 / softmax tile | setup +512.87 ps; setup TNS=0 |
 
 † GEMV 的 floorplan hold 尚有 10.38 ps 缺口，不能表述为 post-route/CTS 时序签核通过。
-‡ GEMV/Accumulation 为已测 FP16 原语和 state event 组合的能量模型；Vector 为当前 r6
-mapped-netlist gate-VCD 结果。它们都只是标准单元 proxy，不能直接相加、按 Bank 数外推或视为
+‡ GEMV/Accumulation 为已测 FP16 原语和 state event 组合的能量模型；Vector 为当前 r9
+32-head II=1 mapped-netlist gate-VCD 的 idle 扣除结果。它们都只是标准单元 proxy，不能直接相加、按 Bank 数外推或视为
 真实 1z-nm/系统级功耗。
 
 ### Base-Die 新增模块 PPA
@@ -197,13 +197,15 @@ ASAP7 TC / 1.500 ns（666.7 MHz）约束。Accumulation 的 VCD 为 256 条遵�
 | 模块 | 算术/流水实现 | Synth logical area | Floorplan instance area | `E_instr`（pJ） | 666 MHz 时序 proxy |
 | --- | --- | ---: | ---: | ---: | --- |
 | Accumulation Unit | 16-lane FP16 partial-GEMV collector；4 slot；4-stage FP16 add | 2,974.44 µm² | 3,097.39 µm² | 7.11 / accepted partial update‡ | setup/hold TNS=0；adder gated-domain fmax 749.76 MHz，setup slack 166.24 ps |
-| Vector Unit | tile-width 并行：16 exp、16 reciprocal、16 sigmoid、16 mul；8/4/2/1 add tree | 7,906.98 µm² | 7,911 µm² | 129.28 / softmax tile；32.81 / SiLU vector；2.34 / ReLU vector | setup/hold TNS=0；vector gated-domain fmax 1,228.20 MHz，setup slack 685.80 ps |
+| Vector Unit | tile-width 并行：16 exp、16 reciprocal、16 sigmoid、16 mul；8/4/2/1 add tree；32-head tagged II=1 pipeline | 10,153.25 µm² | 10,598 µm² | 34.23 / softmax tile | setup TNS=0；vector gated-domain fmax 1,013.04 MHz，setup slack 512.87 ps |
 
 Accumulation 的 `7.11 pJ` 是 `16×e_add + e_psum` 的事件模型；其旧门级 VCD 平均功耗不再作为
-模块间比较列。旧 Vector 的 `1.504 mW` 属于删除的 Q4 RTL，不能与当前 FP16 Vector 混用；当前
-并行 FP16 版本的 `0.561 mW` 是 vectorless proxy。mapped-netlist VCD 已给出：连续
-online-softmax 为 **129.28 pJ/tile**（扣除 idle 基线），16-element SiLU 为
-**32.81 pJ/vector**，16-element ReLU 为 **2.34 pJ/vector**。这些是 ASAP7 standard-cell
+模块间比较列。旧 Vector 的 `1.504 mW` 属于删除的 Q4 RTL，不能与当前 FP16 Vector 混用。
+当前 r9 以 32 个 head 轮转连续发射 128 个 online-softmax tile，mapped-netlist VCD 得到
+`15.51548 mW` active、`0.303787 mW` idle；288.002 ns 时窗下换算为
+**34.91 pJ/tile**（含基线）或 **34.23 pJ/tile**（扣除 idle）。r8 的
+`128.74 pJ/tile` 来自单 tile 控制器的稀疏四指令 trace，不应再代表当前吞吐模式；旧 r8
+SiLU/ReLU 能量也不列入当前 r9 汇总表。这些是 ASAP7 standard-cell
 workload proxy，不能作为真实 PIM/DRAM 系统能耗或与旧串行版直接作能效比较；它们均未包含 PIM memory macro、DRAM/封装互连、外部消费者、CTS/route 寄生或真实 1z-nm DRAM PDK。
 
 完整接口、工作负载和测量复现步骤见 [Base-Die 模块文档](docs/melon_base_die_units.md)。

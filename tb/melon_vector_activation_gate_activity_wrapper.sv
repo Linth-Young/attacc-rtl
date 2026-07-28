@@ -55,7 +55,8 @@ module melon_vector_activation_gate_activity_wrapper #(
 
   melon_vector_unit dut (
     .clk(clk), .rst_n(rst_n), .state_reset(1'b0),
-    .tile_valid(1'b0), .tile_last(1'b0), .score_data('0),
+    .tile_valid(1'b0), .tile_last(1'b0), .tile_head_id(5'd0),
+    .tile_state_reset(1'b0), .score_data('0),
     .tile_ready(), .tile_ack(), .bank_rescale(bank_rescale),
     .normalizer_recip(normalizer_recip), .weight_data(), .weight_valid(),
     .sequence_done(), .state_max_out(state_max_out), .state_sum_out(state_sum_out),
