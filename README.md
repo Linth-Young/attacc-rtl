@@ -2,7 +2,7 @@
 
 本仓库是对论文 [*AttAcc! Unleashing the Power of PIM for Batched Transformer-based Generative Model Inference*（ASPLOS 2024）](https://dl.acm.org/doi/10.1145/3620665.3640422) Section 5.1 中 **bank-level GemV unit** 的可综合 SystemVerilog 架构级复现。
 
-它只实现一个 bank 内的 FP16 GemV 数据通路、向量双缓冲和流式命令控制，不包含论文中的 HBM3 命令控制器、bank-group/pseudo-channel accumulator、DRAM 时序、softmax 或完整 Transformer 推理系统。它不是论文作者发布的原始 RTL。
+它实现一个 bank 内的 FP16 GemV 数据通路、向量双缓冲和流式命令控制；另提供 HPCA 投稿稿件中 Base Die 的 Accumulation Unit 和轻量 online-softmax Vector Unit。它不包含 HBM3 命令控制器、DRAM 时序或完整 Transformer 推理系统，也不是论文作者发布的原始 RTL。
 
 ## 当前实现概览
 
@@ -57,6 +57,8 @@ rtl/
   attacc_gemv_unit.sv        # 顶层 GemV、双缓冲、时钟门控、流式控制
   attacc_fp16_operators.sv   # 2-stage multiplier、4-stage adder pipeline
   attacc_fp16_pkg.sv         # 组合 FP16 参考函数
+  melon_accumulation_unit.sv # pseudo-channel 16-lane partial-GEMV collector
+  melon_vector_unit.sv       # Base-Die online-softmax Q4 Vector Unit
 tb/
   attacc_gemv_unit_tb.sv     # score/context/II=1 score stream 测试
   openroad_clkgate_sim.sv    # 仿真用 OPENROAD_CLKGATE 功能模型
@@ -69,6 +71,7 @@ vivado/
   run_synth_666mhz.tcl       # UltraScale+ 时序代理流程
 docs/
   attacc_gemv_rtl_handoff.md # 完整中文交接、PPA 与限制说明
+  melon_base_die_units.md    # Accumulation/Vector 接口、近似与独立 PPA
 ```
 
 ## 顶层接口
@@ -153,16 +156,18 @@ podman run --rm --userns=keep-id \
 | 指标 | 数值 | 备注 |
 | --- | ---: | --- |
 | Synth logical area | 9,106 µm² | ASAP7 标准单元 |
-| Floorplan instance area | 9,223.53 µm² | 不含 placement 留白 |
-| 论文 10x 密度惩罚缩放面积 | 0.0922353 mm² | 比论文 0.094 mm² 小约 1.88% |
-| Floorplan fmax metric | 802.77 MHz | 非时序签核结论 |
-| ORFS power proxy | 0.657587 W | 非真实 workload 功耗 |
+| Floorplan instance area | 9,210.74 µm² | 不含 placement 留白 |
+| 论文 10x 密度惩罚缩放面积 | 0.0921074 mm² | 比论文 0.094 mm² 小约 2.01% |
+| 门控域 period-min | 1312.68 ps（761.80 MHz） | 666 MHz target 下 setup slack 187.32 ps |
+| ORFS vectorless power proxy | 5.177 mW | 非真实 workload 功耗 |
+| 门级 VCD 动态功耗 proxy | 3.620 mW | 1024 条连续 score GEMV、有效 FP16 数据流、24,668 pin activities |
 
 **功耗与时序限制：**
 
-1. 本仓库不随附活动 VCD；若 `artifacts/attacc_gemv_activity.vcd` 不存在，flow 会退化为 vectorless 默认活动率。当前 VCD 尚未正确映射到最新门控层级，OpenROAD 日志会显示 `Annotated 0 pin activities`。因此 0.657587 W 仅表明时钟门控的库级估算效果，不能作为论文或系统功耗。
-2. 该 proxy 前，未门控 FF buffer 的相同 flow 曾得到约 8.97 W；逐 word 写时钟门控将其降至约 0.658 W。真实 macro-based PIM buffer 的功耗仍需 SRAM macro、门级 VCD/SAIF 与 post-route 提取验证。
-3. floorplan 阶段仍有未修复 setup violation（`RSZ-0062`）；802.77 MHz 不能表述为已通过 666 MHz 签核。
+1. ORFS/ASAP7 STA 的时间单位为 ps，因此 666 MHz SDC 使用 `1500 ps` 周期、50 ps setup uncertainty 和门控 derived clocks。旧版把 `1.500` 误当作 ns，实际被解释为 1.5 ps，旧 PPA 数值不可再用于时序或功耗比较。
+2. `5.177 mW` 是 vectorless 默认活动率，并非 workload 功耗。新增的 `3.620 mW` 来自与 ORFS 映射网表一致的 gate VCD：先写入 16 个 vector words，再以 II=1 发射 1024 条 score GEMV；输入是 16 组有限、正规 FP16 值而非全零/全一。OpenROAD 确认注释了 24,668 个 pin activities。由于该 gate-VCD 生成器的全内部、全结果观察版本超过本机内存限制，这个值仍是 standard-cell GEMV **动态 proxy/下界**，不含 PIM SRAM/DRAM、互连、输出消费者、CTS/route 寄生或真实 1z-nm 工艺。
+3. 这也解释了为什么 VCD 数值可能低于 vectorless 数值：默认 activity 会对未注释网络施加统一翻转率，而本 workload 的实际位翻转受具体 FP16 数据分布与时钟门控限制；两者不能互相替代，也不能直接外推到数百个 Bank。
+4. 该 floorplan proxy 已通过 setup（187.32 ps slack），但 hold 仍有 10.38 ps 缺口；它不是 post-route/CTS 签核结论。
 
 ## 与论文的关系与边界
 

@@ -6,6 +6,7 @@ artifacts/
 *.pb
 xsim.dir/
 work/
+.local/
 
 # OpenROAD-flow-scripts outputs
 logs/

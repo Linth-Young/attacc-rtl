@@ -1,5 +1,9 @@
-create_clock -name gemv_clk -period 1.500 [get_ports clk]
-set_clock_uncertainty 0.050 [get_clocks gemv_clk]
+create_clock -name gemv_clk -period 1500 [get_ports clk]
+create_generated_clock -name gemv_gclk -source [get_ports clk] -divide_by 1 [get_nets -regexp {.*gclk.*}]
+set_clock_uncertainty -setup 50 [get_clocks gemv_clk]
+set_clock_uncertainty -hold 0 [get_clocks gemv_clk]
+set_clock_uncertainty -setup 50 [get_clocks gemv_gclk]
+set_clock_uncertainty -hold 0 [get_clocks gemv_gclk]
 
 # This is a bank-local macro measurement, not a package-I/O timing contract.
 set_false_path -from [get_ports rst_n]

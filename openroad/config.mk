@@ -4,7 +4,7 @@
 export PLATFORM                = asap7
 export CORNER                  = TC
 export DESIGN_NAME             = attacc_gemv_unit
-export DESIGN_NICKNAME         = attacc_gemv_666mhz_stream4fwd_streamout_wcg
+export DESIGN_NICKNAME         = attacc_gemv_666mhz_sdcfix
 
 export VERILOG_FILES           = \
   $(abspath rtl/attacc_fp16_pkg.sv) \
