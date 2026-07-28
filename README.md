@@ -169,6 +169,22 @@ podman run --rm --userns=keep-id \
 3. 这也解释了为什么 VCD 数值可能低于 vectorless 数值：默认 activity 会对未注释网络施加统一翻转率，而本 workload 的实际位翻转受具体 FP16 数据分布与时钟门控限制；两者不能互相替代，也不能直接外推到数百个 Bank。
 4. 该 floorplan proxy 已通过 setup（187.32 ps slack），但 hold 仍有 10.38 ps 缺口；它不是 post-route/CTS 签核结论。
 
+### 表 I：单元级 PPA 汇总（HPCA 风格）
+
+所有条目使用 ASAP7 TC 标准单元库和 1.500 ns（666.7 MHz）约束。面积为 `synth / floorplan`
+实例面积；`P_VCD` 是以对应门级 VCD 回标的动态 proxy，`P_vec` 是 ORFS vectorless proxy。
+
+| Unit | Function / configuration | Area (µm²) | Freq. target | `P_VCD` (mW) | `P_vec` (mW) | Activity workload | Timing proxy |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| Bank GEMV | FP16, 16× mul, 16× add, 4 accumulator slots | 9,106 / 9,210.74 | 666.7 MHz | 3.620† | 5.177 | 16 vector writes + 1,024 II=1 score commands | setup +187.32 ps; hold −10.38 ps‡ |
+| Pseudo-channel Accumulation | FP16 16-lane collector, 4 slots, 4-stage add | 2,974.44 / 3,097.39 | 666.7 MHz | 14.501 | 13.799 | 256 ready/valid partial-GEMV commands | setup +166.24 ps; setup/hold TNS=0 |
+| Base-Die Vector | Q4 online-softmax, 8-stage pipeline | 780.55 / 823.25 | 666.7 MHz | 1.504 | 1.365 | 128 ready/valid online-softmax tiles | setup +890.09 ps; setup/hold TNS=0 |
+
+† GEMV 的全内部/全结果观察 VCD 超出本机内存，故 `P_VCD` 是已注释 24,668 个 pin activities 的
+动态 proxy 下界。‡ GEMV 的 floorplan hold 尚有 10.38 ps 缺口，不能表述为 post-route/CTS
+时序签核通过。不同单元的 VCD workload 不同，功耗不得直接相加、按 Bank 数外推或视为真实
+1z-nm/系统级功耗。
+
 ### Base-Die 新增模块 PPA
 
 下表是 `rtl/melon_accumulation_unit.sv` 与 `rtl/melon_vector_unit.sv` 的独立测量，使用同一
