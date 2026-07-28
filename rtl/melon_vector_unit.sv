@@ -1,19 +1,18 @@
 `timescale 1ns/1ps
 
-// MELON Base-Die Vector Unit: FP16 online-softmax and ReLU/SiLU engine.
+// MELON Base-Die Vector Unit, HPCA architecture-level reconstruction.
 //
-// The HPCA submission specifies FP16 comparator/add trees, exponent, divider,
-// element-wise arithmetic, and an online-softmax state buffer.  It does not
-// specify a transcendental circuit or lane count.  This area-oriented RTL uses
-// one pipelined FP16 delta subtractor, reducer, and multiplier. Thus
-// every externally visible datum and state value is binary16 and the critical
-// arithmetic stages meet the same 1.5 ns target as the GEMV datapath.  The
-// cost is a longer tile interval, which is explicit in tile_ready.
-//
-// exp, reciprocal, and sigmoid are monotonic FP16-output LUT approximations;
-// the paper names these units but provides no exact approximation. Replacing
-// the three functions by characterized FP16 math macros preserves this port
-// and control protocol.
+// A Vector tile is 16 binary16 values, matching the GemV tile width.  Unlike
+// the former area-oriented prototype, this implementation has a lane-parallel
+// FP16 datapath: 16 delta adders, 16 exponent units, a pipelined 8/4/2/1 FP16
+// adder tree, 16 reciprocal/divider lanes, and 16 element-wise multipliers.
+// The multiplier array executes SiLU; softmax weights remain in the online
+// recurrence's unnormalised exp domain so Pseudo-channel Accumulation can
+// rescale prior partial sums exactly as described by the paper.  ReLU is a
+// per-lane compare/select.  All arithmetic blocks have registered
+// boundaries.  The paper does not specify exp/div approximation circuitry, so
+// the explicit FP16 pipelines in attacc_fp16_operators.sv use replaceable
+// monotonic LUT implementations rather than claiming bit-exact libm results.
 module melon_vector_unit #(
   parameter int LANES = 16
 ) (
@@ -44,54 +43,76 @@ module melon_vector_unit #(
   localparam int MAX_L1 = LANES / 2;
   localparam int MAX_L2 = LANES / 4;
   localparam int MAX_L3 = LANES / 8;
-  localparam int IDX_W = $clog2(LANES);
 
-  localparam logic [4:0] IDLE             = 5'd0;
-  localparam logic [4:0] MAX2             = 5'd1;
-  localparam logic [4:0] MAX3             = 5'd2;
-  localparam logic [4:0] MAXFINAL         = 5'd3;
-  localparam logic [4:0] DELTA_ISSUE      = 5'd4;
-  localparam logic [4:0] DELTA_WAIT       = 5'd5;
-  localparam logic [4:0] OLD_DELTA_ISSUE  = 5'd6;
-  localparam logic [4:0] OLD_DELTA_WAIT   = 5'd7;
-  localparam logic [4:0] OLD_MUL_ISSUE    = 5'd8;
-  localparam logic [4:0] OLD_MUL_WAIT     = 5'd9;
-  localparam logic [4:0] SUM_ISSUE        = 5'd10;
-  localparam logic [4:0] SUM_WAIT         = 5'd11;
-  localparam logic [4:0] FINAL_ISSUE      = 5'd12;
-  localparam logic [4:0] FINAL_WAIT       = 5'd13;
-  localparam logic [4:0] ACT_ISSUE        = 5'd14;
-  localparam logic [4:0] ACT_WAIT         = 5'd15;
+  localparam logic [5:0] IDLE             = 6'd0;
+  localparam logic [5:0] MAX2             = 6'd1;
+  localparam logic [5:0] MAX3             = 6'd2;
+  localparam logic [5:0] MAX4             = 6'd3;
+  localparam logic [5:0] DELTA_ISSUE      = 6'd4;
+  localparam logic [5:0] DELTA_WAIT       = 6'd5;
+  localparam logic [5:0] EXP_WAIT         = 6'd6;
+  localparam logic [5:0] OLD_DELTA_ISSUE  = 6'd7;
+  localparam logic [5:0] OLD_DELTA_WAIT   = 6'd8;
+  localparam logic [5:0] OLD_EXP_WAIT     = 6'd9;
+  localparam logic [5:0] OLD_MUL_ISSUE    = 6'd10;
+  localparam logic [5:0] OLD_MUL_WAIT     = 6'd11;
+  localparam logic [5:0] SUM1_ISSUE       = 6'd12;
+  localparam logic [5:0] SUM1_WAIT        = 6'd13;
+  localparam logic [5:0] SUM2_ISSUE       = 6'd14;
+  localparam logic [5:0] SUM2_WAIT        = 6'd15;
+  localparam logic [5:0] SUM3_ISSUE       = 6'd16;
+  localparam logic [5:0] SUM3_WAIT        = 6'd17;
+  localparam logic [5:0] SUM4_ISSUE       = 6'd18;
+  localparam logic [5:0] SUM4_WAIT        = 6'd19;
+  localparam logic [5:0] FINAL_ISSUE      = 6'd20;
+  localparam logic [5:0] FINAL_WAIT       = 6'd21;
+  localparam logic [5:0] RECIP_ISSUE      = 6'd22;
+  localparam logic [5:0] RECIP_WAIT       = 6'd23;
+  localparam logic [5:0] WEIGHT_ISSUE     = 6'd24;
+  localparam logic [5:0] WEIGHT_WAIT      = 6'd25;
+  localparam logic [5:0] ACT_SIG_ISSUE    = 6'd26;
+  localparam logic [5:0] ACT_SIG_WAIT     = 6'd27;
+  localparam logic [5:0] ACT_MUL_ISSUE    = 6'd28;
+  localparam logic [5:0] ACT_MUL_WAIT     = 6'd29;
+  localparam logic [5:0] ACT_RELU         = 6'd30;
 
-  import attacc_fp16_pkg::*;
-
-  logic [4:0] phase;
+  logic [5:0] phase;
   logic work_gclk, soft_accept, act_accept;
-  logic state_valid, base_state_valid, tile_last_hold;
-  logic [15:0] state_max, state_sum, base_state_max, base_state_sum, next_max;
-  logic [15:0] old_scale_hold, old_scaled_hold, reduce_accum;
-  logic [IDX_W-1:0] lane_index;
+  logic state_valid, base_state_valid, tile_last_hold, activation_silu_hold;
+  logic [15:0] state_max, state_sum, base_state_max, base_state_sum;
+  logic [15:0] next_max, old_scale_hold, old_scaled_hold, new_sum_hold;
+  logic [15:0] final_sum_hold;
   logic [LANES*16-1:0] score_hold, exp_hold, activation_hold;
-  logic activation_silu_hold;
-
   logic [15:0] max_l1 [0:MAX_L1-1];
   logic [15:0] max_l2 [0:MAX_L2-1];
   logic [15:0] max_l3 [0:MAX_L3-1];
+  logic [15:0] sum_l1 [0:MAX_L1-1];
+  logic [15:0] sum_l2 [0:MAX_L2-1];
+  logic [15:0] sum_l3 [0:MAX_L3-1];
+  logic [15:0] sum_l4;
+  logic [15:0] delta_y [0:LANES-1];
+  logic [15:0] exp_y [0:LANES-1];
+  logic [15:0] recip_y [0:LANES-1];
+  logic [15:0] sigmoid_y [0:LANES-1];
+  logic [15:0] elem_y [0:LANES-1];
+  logic [15:0] sum1_y [0:MAX_L1-1];
+  logic [15:0] sum2_y [0:MAX_L2-1];
+  logic [15:0] sum3_y [0:MAX_L3-1];
+  logic [15:0] sum4_y;
+  logic [LANES-1:0] delta_valid, exp_valid, recip_valid, sigmoid_valid, elem_valid;
+  logic [MAX_L1-1:0] sum1_valid;
+  logic [MAX_L2-1:0] sum2_valid;
+  logic [MAX_L3-1:0] sum3_valid;
+  logic sum4_valid, old_delta_valid, old_exp_valid, old_mul_valid, final_valid;
+  logic [15:0] old_delta_y, old_exp_y, old_mul_y, final_y;
   logic [15:0] max_value_comb;
-
-  logic delta_valid;
-  logic [15:0] delta_y;
-  logic reducer_valid;
-  logic [15:0] reducer_y;
-  logic mul_valid;
-  logic [15:0] mul_y;
   integer i;
 
   function automatic logic fp16_ge(input logic [15:0] a, input logic [15:0] b);
     begin
       if (a[15] != b[15]) fp16_ge = !a[15];
-      else if (!a[15])    fp16_ge = (a[14:0] >= b[14:0]);
-      else                fp16_ge = (a[14:0] <= b[14:0]);
+      else if (!a[15]) fp16_ge = (a[14:0] >= b[14:0]);
+      else fp16_ge = (a[14:0] <= b[14:0]);
     end
   endfunction
   function automatic logic [15:0] fp16_max(input logic [15:0] a, input logic [15:0] b);
@@ -102,58 +123,6 @@ module melon_vector_unit #(
   endfunction
   function automatic logic [15:0] fp16_relu(input logic [15:0] a);
     begin fp16_relu = a[15] ? 16'h0000 : a; end
-  endfunction
-
-  function automatic logic [15:0] fp16_exp_neg_lut(input logic [15:0] x);
-    logic [14:0] mag;
-    begin
-      mag = x[14:0];
-      if (!x[15] || mag == 0)  fp16_exp_neg_lut = 16'h3c00;
-      else if (mag < 15'h3800) fp16_exp_neg_lut = 16'h3a3b;
-      else if (mag < 15'h3c00) fp16_exp_neg_lut = 16'h38da;
-      else if (mag < 15'h4000) fp16_exp_neg_lut = 16'h35e3;
-      else if (mag < 15'h4400) fp16_exp_neg_lut = 16'h3054;
-      else if (mag < 15'h4800) fp16_exp_neg_lut = 16'h24b0;
-      else                      fp16_exp_neg_lut = 16'h0d7c;
-    end
-  endfunction
-
-  function automatic logic [15:0] fp16_recip_lut(input logic [15:0] a);
-    integer eout;
-    logic [9:0] frac;
-    begin
-      if (a[14:0] == 0) fp16_recip_lut = 16'h7bff;
-      else if (a[14:10] == 5'h1f) fp16_recip_lut = 16'h0000;
-      else if (a[9:0] == 0) begin
-        eout = 30 - a[14:10];
-        if (eout <= 0) fp16_recip_lut = 16'h0000;
-        else if (eout >= 31) fp16_recip_lut = 16'h7bff;
-        else fp16_recip_lut = {1'b0, eout[4:0], 10'b0};
-      end else begin
-        eout = 29 - a[14:10];
-        case (a[9:7])
-          3'd0: frac = 10'd797; 3'd1: frac = 10'd614;
-          3'd2: frac = 10'd466; 3'd3: frac = 10'd341;
-          3'd4: frac = 10'd237; 3'd5: frac = 10'd146;
-          default: frac = 10'd69;
-        endcase
-        if (eout <= 0) fp16_recip_lut = 16'h0000;
-        else if (eout >= 31) fp16_recip_lut = 16'h7bff;
-        else fp16_recip_lut = {1'b0, eout[4:0], frac};
-      end
-    end
-  endfunction
-
-  function automatic logic [15:0] fp16_sigmoid_lut(input logic [15:0] a);
-    logic [14:0] mag;
-    begin
-      mag = a[14:0];
-      if (mag < 15'h3800) fp16_sigmoid_lut = 16'h3800;
-      else if (mag < 15'h3c00) fp16_sigmoid_lut = a[15] ? 16'h344e : 16'h39d9;
-      else if (mag < 15'h4000) fp16_sigmoid_lut = a[15] ? 16'h2f9e : 16'h3b0c;
-      else if (mag < 15'h4400) fp16_sigmoid_lut = a[15] ? 16'h2a04 : 16'h3ba0;
-      else                     fp16_sigmoid_lut = a[15] ? 16'h249c : 16'h3bdb;
-    end
   endfunction
 
   assign tile_ready = (phase == IDLE);
@@ -170,72 +139,94 @@ module melon_vector_unit #(
     .CK(clk), .E((phase != IDLE) | soft_accept | act_accept | state_reset), .GCK(work_gclk)
   );
 
-  attacc_fp16_add_pipe u_delta (
-    .clk(clk), .rst_n(rst_n),
-    .in_valid((phase == DELTA_ISSUE) | (phase == OLD_DELTA_ISSUE)),
-    .a(phase == OLD_DELTA_ISSUE ? base_state_max : score_hold[lane_index*16 +: 16]),
-    .b(fp16_neg(next_max)), .out_valid(delta_valid), .y(delta_y)
-  );
+  genvar g;
+  generate
+    for (g = 0; g < LANES; g = g + 1) begin : g_lane
+      attacc_fp16_add_fast_pipe u_delta (
+        .clk(clk), .rst_n(rst_n), .in_valid(phase == DELTA_ISSUE),
+        .a(score_hold[g*16 +: 16]), .b(fp16_neg(next_max)),
+        .out_valid(delta_valid[g]), .y(delta_y[g])
+      );
+      attacc_fp16_exp_neg_pipe u_exp (
+        .clk(clk), .rst_n(rst_n), .in_valid(delta_valid[g]), .x(delta_y[g]),
+        .out_valid(exp_valid[g]), .y(exp_y[g])
+      );
+      // The paper leaves divider count open.  The tile-width reciprocal array
+      // makes a lane-local normalization result available; the current online
+      // protocol exports lane 0 because all lanes divide the same state sum.
+      (* keep = "true" *) attacc_fp16_recip_pipe u_recip (
+        .clk(clk), .rst_n(rst_n), .in_valid(phase == RECIP_ISSUE), .x(final_sum_hold),
+        .out_valid(recip_valid[g]), .y(recip_y[g])
+      );
+      attacc_fp16_sigmoid_pipe u_sigmoid (
+        .clk(clk), .rst_n(rst_n), .in_valid(phase == ACT_SIG_ISSUE),
+        .x(activation_hold[g*16 +: 16]), .out_valid(sigmoid_valid[g]), .y(sigmoid_y[g])
+      );
+      attacc_fp16_mul_pipe u_elementwise_mul (
+        .clk(clk), .rst_n(rst_n),
+        .in_valid(phase == ACT_MUL_ISSUE),
+        .a(activation_hold[g*16 +: 16]), .b(sigmoid_y[g]),
+        .out_valid(elem_valid[g]), .y(elem_y[g])
+      );
+    end
+    for (g = 0; g < MAX_L1; g = g + 1) begin : g_sum_l1
+      attacc_fp16_add_fast_pipe u_add (
+        .clk(clk), .rst_n(rst_n), .in_valid(phase == SUM1_ISSUE),
+        .a(exp_hold[(2*g)*16 +: 16]), .b(exp_hold[(2*g+1)*16 +: 16]),
+        .out_valid(sum1_valid[g]), .y(sum1_y[g])
+      );
+    end
+    for (g = 0; g < MAX_L2; g = g + 1) begin : g_sum_l2
+      attacc_fp16_add_fast_pipe u_add (
+        .clk(clk), .rst_n(rst_n), .in_valid(phase == SUM2_ISSUE),
+        .a(sum_l1[2*g]), .b(sum_l1[2*g+1]), .out_valid(sum2_valid[g]), .y(sum2_y[g])
+      );
+    end
+    for (g = 0; g < MAX_L3; g = g + 1) begin : g_sum_l3
+      attacc_fp16_add_fast_pipe u_add (
+        .clk(clk), .rst_n(rst_n), .in_valid(phase == SUM3_ISSUE),
+        .a(sum_l2[2*g]), .b(sum_l2[2*g+1]), .out_valid(sum3_valid[g]), .y(sum3_y[g])
+      );
+    end
+  endgenerate
 
-  // One 4-stage FP16 adder is reused for the online-normalizer recurrence and
-  // final state merge. It is never placed on a combinational critical path.
-  attacc_fp16_add_pipe u_reducer (
-    .clk(clk), .rst_n(rst_n), .in_valid((phase == SUM_ISSUE) | (phase == FINAL_ISSUE)),
-    .a(phase == FINAL_ISSUE ? reduce_accum : reduce_accum),
-    .b(phase == FINAL_ISSUE ? old_scaled_hold : exp_hold[lane_index*16 +: 16]),
-    .out_valid(reducer_valid), .y(reducer_y)
+  attacc_fp16_add_fast_pipe u_sum_l4 (
+    .clk(clk), .rst_n(rst_n), .in_valid(phase == SUM4_ISSUE),
+    .a(sum_l3[0]), .b(sum_l3[1]), .out_valid(sum4_valid), .y(sum4_y)
   );
-
-  // The multiplier performs old-state rescaling for softmax and is reused for
-  // each activation lane. The two operations are mutually exclusive by phase.
-  attacc_fp16_mul_pipe u_multiplier (
-    .clk(clk), .rst_n(rst_n), .in_valid((phase == OLD_MUL_ISSUE) | (phase == ACT_ISSUE)),
-    .a(phase == ACT_ISSUE ?
-       (activation_silu_hold ? activation_hold[lane_index*16 +: 16] : fp16_relu(activation_hold[lane_index*16 +: 16])) :
-       base_state_sum),
-    .b(phase == ACT_ISSUE ?
-       (activation_silu_hold ? fp16_sigmoid_lut(activation_hold[lane_index*16 +: 16]) : 16'h3c00) : old_scale_hold),
-    .out_valid(mul_valid), .y(mul_y)
+  attacc_fp16_add_fast_pipe u_old_delta (
+    .clk(clk), .rst_n(rst_n), .in_valid(phase == OLD_DELTA_ISSUE),
+    .a(base_state_max), .b(fp16_neg(next_max)), .out_valid(old_delta_valid), .y(old_delta_y)
+  );
+  attacc_fp16_exp_neg_pipe u_old_exp (
+    .clk(clk), .rst_n(rst_n), .in_valid(old_delta_valid), .x(old_delta_y),
+    .out_valid(old_exp_valid), .y(old_exp_y)
+  );
+  attacc_fp16_mul_pipe u_old_rescale_mul (
+    .clk(clk), .rst_n(rst_n), .in_valid(phase == OLD_MUL_ISSUE),
+    .a(base_state_sum), .b(old_scale_hold), .out_valid(old_mul_valid), .y(old_mul_y)
+  );
+  attacc_fp16_add_fast_pipe u_final_add (
+    .clk(clk), .rst_n(rst_n), .in_valid(phase == FINAL_ISSUE),
+    .a(old_scaled_hold), .b(new_sum_hold), .out_valid(final_valid), .y(final_y)
   );
 
   always_ff @(posedge work_gclk or negedge rst_n) begin
     if (!rst_n) begin
-      phase <= IDLE;
-      state_valid <= 1'b0;
-      state_max <= '0;
-      state_sum <= '0;
-      base_state_valid <= 1'b0;
-      base_state_max <= '0;
-      base_state_sum <= '0;
-      next_max <= '0;
-      old_scale_hold <= '0;
-      old_scaled_hold <= '0;
-      reduce_accum <= '0;
-      lane_index <= '0;
-      score_hold <= '0;
-      exp_hold <= '0;
-      activation_hold <= '0;
-      activation_silu_hold <= 1'b0;
-      tile_last_hold <= 1'b0;
-      tile_ack <= 1'b0;
-      bank_rescale <= '0;
-      normalizer_recip <= '0;
-      weight_data <= '0;
-      weight_valid <= 1'b0;
-      sequence_done <= 1'b0;
-      activation_ack <= 1'b0;
-      activation_out_valid <= 1'b0;
-      activation_result <= '0;
-      for (i = 0; i < MAX_L1; i = i + 1) max_l1[i] <= '0;
-      for (i = 0; i < MAX_L2; i = i + 1) max_l2[i] <= '0;
-      for (i = 0; i < MAX_L3; i = i + 1) max_l3[i] <= '0;
+      phase <= IDLE; state_valid <= 0; state_max <= 0; state_sum <= 0;
+      base_state_valid <= 0; base_state_max <= 0; base_state_sum <= 0;
+      next_max <= 0; old_scale_hold <= 0; old_scaled_hold <= 0; new_sum_hold <= 0;
+      final_sum_hold <= 0; score_hold <= 0; exp_hold <= 0; activation_hold <= 0;
+      tile_last_hold <= 0; activation_silu_hold <= 0; tile_ack <= 0; bank_rescale <= 0;
+      normalizer_recip <= 0; weight_data <= 0; weight_valid <= 0; sequence_done <= 0;
+      activation_ack <= 0; activation_out_valid <= 0; activation_result <= 0;
+      for (i = 0; i < MAX_L1; i = i + 1) begin max_l1[i] <= 0; sum_l1[i] <= 0; end
+      for (i = 0; i < MAX_L2; i = i + 1) begin max_l2[i] <= 0; sum_l2[i] <= 0; end
+      for (i = 0; i < MAX_L3; i = i + 1) begin max_l3[i] <= 0; sum_l3[i] <= 0; end
+      sum_l4 <= 0;
     end else begin
-      tile_ack <= 1'b0;
-      weight_valid <= 1'b0;
-      sequence_done <= 1'b0;
-      activation_ack <= 1'b0;
-      activation_out_valid <= 1'b0;
-
+      tile_ack <= 0; weight_valid <= 0; sequence_done <= 0;
+      activation_ack <= 0; activation_out_valid <= 0;
       case (phase)
         IDLE: begin
           if (soft_accept) begin
@@ -250,93 +241,68 @@ module melon_vector_unit #(
           end else if (act_accept) begin
             activation_hold <= activation_data;
             activation_silu_hold <= activation_silu;
-            lane_index <= '0;
-            phase <= ACT_ISSUE;
+            phase <= activation_silu ? ACT_SIG_ISSUE : ACT_RELU;
           end else if (state_reset) begin
-            state_valid <= 1'b0;
-            state_max <= '0;
-            state_sum <= '0;
+            state_valid <= 0; state_max <= 0; state_sum <= 0;
           end
         end
         MAX2: begin
-          for (i = 0; i < MAX_L2; i = i + 1)
-            max_l2[i] <= fp16_max(max_l1[2*i], max_l1[2*i+1]);
+          for (i = 0; i < MAX_L2; i = i + 1) max_l2[i] <= fp16_max(max_l1[2*i], max_l1[2*i+1]);
           phase <= MAX3;
         end
         MAX3: begin
-          for (i = 0; i < MAX_L3; i = i + 1)
-            max_l3[i] <= fp16_max(max_l2[2*i], max_l2[2*i+1]);
-          phase <= MAXFINAL;
+          for (i = 0; i < MAX_L3; i = i + 1) max_l3[i] <= fp16_max(max_l2[2*i], max_l2[2*i+1]);
+          phase <= MAX4;
         end
-        MAXFINAL: begin
-          next_max <= max_value_comb;
-          lane_index <= '0;
-          phase <= DELTA_ISSUE;
-        end
-        DELTA_ISSUE: begin
-          phase <= DELTA_WAIT;
-        end
-        DELTA_WAIT: if (delta_valid) begin
-          exp_hold[lane_index*16 +: 16] <= fp16_exp_neg_lut(delta_y);
-          if (lane_index == LANES-1) begin
-            if (base_state_valid) phase <= OLD_DELTA_ISSUE;
-            else begin
-              old_scale_hold <= '0;
-              old_scaled_hold <= '0;
-              reduce_accum <= '0;
-              lane_index <= '0;
-              phase <= SUM_ISSUE;
-            end
-          end else begin
-            lane_index <= lane_index + 1'b1;
-            phase <= DELTA_ISSUE;
-          end
+        MAX4: begin next_max <= max_value_comb; phase <= DELTA_ISSUE; end
+        DELTA_ISSUE: phase <= DELTA_WAIT;
+        DELTA_WAIT: if (&delta_valid) phase <= EXP_WAIT;
+        EXP_WAIT: if (&exp_valid) begin
+          for (i = 0; i < LANES; i = i + 1) exp_hold[i*16 +: 16] <= exp_y[i];
+          phase <= base_state_valid ? OLD_DELTA_ISSUE : SUM1_ISSUE;
+          if (!base_state_valid) begin old_scale_hold <= 0; old_scaled_hold <= 0; end
         end
         OLD_DELTA_ISSUE: phase <= OLD_DELTA_WAIT;
-        OLD_DELTA_WAIT: if (delta_valid) begin
-          old_scale_hold <= fp16_exp_neg_lut(delta_y);
-          phase <= OLD_MUL_ISSUE;
-        end
+        OLD_DELTA_WAIT: if (old_delta_valid) phase <= OLD_EXP_WAIT;
+        OLD_EXP_WAIT: if (old_exp_valid) begin old_scale_hold <= old_exp_y; phase <= OLD_MUL_ISSUE; end
         OLD_MUL_ISSUE: phase <= OLD_MUL_WAIT;
-        OLD_MUL_WAIT: if (mul_valid) begin
-          old_scaled_hold <= mul_y;
-          reduce_accum <= '0;
-          lane_index <= '0;
-          phase <= SUM_ISSUE;
+        OLD_MUL_WAIT: if (old_mul_valid) begin old_scaled_hold <= old_mul_y; phase <= SUM1_ISSUE; end
+        SUM1_ISSUE: phase <= SUM1_WAIT;
+        SUM1_WAIT: if (&sum1_valid) begin
+          for (i = 0; i < MAX_L1; i = i + 1) sum_l1[i] <= sum1_y[i];
+          phase <= SUM2_ISSUE;
         end
-        SUM_ISSUE: phase <= SUM_WAIT;
-        SUM_WAIT: if (reducer_valid) begin
-          reduce_accum <= reducer_y;
-          if (lane_index == LANES-1) phase <= FINAL_ISSUE;
-          else begin
-            lane_index <= lane_index + 1'b1;
-            phase <= SUM_ISSUE;
-          end
+        SUM2_ISSUE: phase <= SUM2_WAIT;
+        SUM2_WAIT: if (&sum2_valid) begin
+          for (i = 0; i < MAX_L2; i = i + 1) sum_l2[i] <= sum2_y[i];
+          phase <= SUM3_ISSUE;
         end
+        SUM3_ISSUE: phase <= SUM3_WAIT;
+        SUM3_WAIT: if (&sum3_valid) begin
+          for (i = 0; i < MAX_L3; i = i + 1) sum_l3[i] <= sum3_y[i];
+          phase <= SUM4_ISSUE;
+        end
+        SUM4_ISSUE: phase <= SUM4_WAIT;
+        SUM4_WAIT: if (sum4_valid) begin sum_l4 <= sum4_y; new_sum_hold <= sum4_y; phase <= FINAL_ISSUE; end
         FINAL_ISSUE: phase <= FINAL_WAIT;
-        FINAL_WAIT: if (reducer_valid) begin
-          state_max <= next_max;
-          state_sum <= reducer_y;
-          state_valid <= 1'b1;
-          bank_rescale <= old_scale_hold;
-          normalizer_recip <= fp16_recip_lut(reducer_y);
-          weight_data <= exp_hold;
-          weight_valid <= 1'b1;
-          tile_ack <= 1'b1;
-          sequence_done <= tile_last_hold;
-          phase <= IDLE;
+        FINAL_WAIT: if (final_valid) begin final_sum_hold <= final_y; phase <= RECIP_ISSUE; end
+        RECIP_ISSUE: phase <= RECIP_WAIT;
+        RECIP_WAIT: if (&recip_valid) begin
+          state_max <= next_max; state_sum <= final_sum_hold; state_valid <= 1'b1;
+          normalizer_recip <= recip_y[0]; bank_rescale <= old_scale_hold;
+          for (i = 0; i < LANES; i = i + 1) weight_data[i*16 +: 16] <= exp_hold[i*16 +: 16];
+          weight_valid <= 1'b1; tile_ack <= 1'b1; sequence_done <= tile_last_hold; phase <= IDLE;
         end
-        ACT_ISSUE: phase <= ACT_WAIT;
-        ACT_WAIT: if (mul_valid) begin
-          activation_result[lane_index*16 +: 16] <= mul_y;
-          if (lane_index == LANES-1) begin
-            activation_ack <= 1'b1;
-            activation_out_valid <= 1'b1;
-            phase <= IDLE;
-          end else begin
-            lane_index <= lane_index + 1'b1;
-            phase <= ACT_ISSUE;
-          end
+        ACT_SIG_ISSUE: phase <= ACT_SIG_WAIT;
+        ACT_SIG_WAIT: if (&sigmoid_valid) phase <= ACT_MUL_ISSUE;
+        ACT_MUL_ISSUE: phase <= ACT_MUL_WAIT;
+        ACT_MUL_WAIT: if (&elem_valid) begin
+          for (i = 0; i < LANES; i = i + 1) activation_result[i*16 +: 16] <= elem_y[i];
+          activation_ack <= 1'b1; activation_out_valid <= 1'b1; phase <= IDLE;
+        end
+        ACT_RELU: begin
+          for (i = 0; i < LANES; i = i + 1) activation_result[i*16 +: 16] <= fp16_relu(activation_hold[i*16 +: 16]);
+          activation_ack <= 1'b1; activation_out_valid <= 1'b1; phase <= IDLE;
         end
         default: phase <= IDLE;
       endcase

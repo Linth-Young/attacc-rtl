@@ -28,8 +28,7 @@ podman run --rm --userns=keep-id \
 | Floorplan instance area | 9,210.74 µm² |
 | 论文 10x 缩放估计 | 0.0921074 mm² |
 | 门控域 period-min | 761.80 MHz |
-| ORFS vectorless power proxy | 5.177088 mW |
-| 门级 VCD 动态 power proxy | 3.620143 mW |
+| Gate-VCD 能量 / issued score GEMV command | ≈6.10 pJ（含 16 次 vector setup write，下界） |
 
 `power_activity.tcl` 仅在 `artifacts/attacc_gemv_activity.vcd` 存在时读取活动文件。
 活动文件必须由与综合网表层级匹配的测试生成；若日志显示 `Annotated 0 pin activities`，
@@ -66,8 +65,10 @@ python3 tools/normalize_gate_vcd.py \
 openroad -no_init -exit openroad/report_gemv_gate_activity.tcl
 ```
 
-当前已有 floorplan 数据库上的报告：`Annotated 24668 pin activities`，总功耗
+当前已有 floorplan 数据库上的报告：`Annotated 24668 pin activities`，总平均功耗
 `3.620143 mW`（internal `1.717955 mW`、switching `1.895666 mW`、leakage
-`0.006522 mW`）。这是 standard-cell 动态 proxy，不含 PIM memory、输出消费者、CTS/route
-寄生或真实 1z-nm 工艺；全输出锥 VCD 在本机内存限制下尚无法完成，所以不能把它当作 silicon
-signoff 或系统级每 Bank 功耗。
+`0.006522 mW`）。对应 1,725 ns 时窗中 1024 条 issued score command，换算为约
+`6.10 pJ/score command`；该时窗还包含 16 次 vector setup write，故应视为 lower bound。
+这是 standard-cell 动态 proxy，不含 PIM memory、输出消费者、CTS/route 寄生或真实 1z-nm
+工艺；全输出锥 VCD 在本机内存限制下尚无法完成，所以不能把它当作 silicon signoff 或系统级
+每 Bank 能耗。

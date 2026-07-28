@@ -3,7 +3,9 @@
 // Unit's eight-stage inter-tile state dependency.
 module melon_vector_gate_activity_wrapper (
   input wire clk,
-  input wire rst_n
+  input wire rst_n,
+  // Keeps every softmax result cone observable during Yosys gate simulation.
+  output wire [15:0] activity_observe
 );
   localparam integer TILES = 128;
   reg [7:0] tile_index;
@@ -64,4 +66,9 @@ module melon_vector_gate_activity_wrapper (
     .activation_data('0), .activation_ack(), .activation_out_valid(),
     .activation_result()
   );
+
+  assign activity_observe = state_max_out ^ state_sum_out ^ bank_rescale ^
+                            normalizer_recip ^ {{15{1'b0}}, tile_ack} ^
+                            {{15{1'b0}}, weight_valid} ^ weight_data[15:0] ^
+                            weight_data[255:240];
 endmodule

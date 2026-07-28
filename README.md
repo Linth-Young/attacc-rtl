@@ -162,48 +162,49 @@ podman run --rm --userns=keep-id \
 | Floorplan instance area | 9,210.74 µm² | 不含 placement 留白 |
 | 论文 10x 密度惩罚缩放面积 | 0.0921074 mm² | 比论文 0.094 mm² 小约 2.01% |
 | 门控域 period-min | 1312.68 ps（761.80 MHz） | 666 MHz target 下 setup slack 187.32 ps |
-| ORFS vectorless power proxy | 5.177 mW | 非真实 workload 功耗 |
-| 门级 VCD 动态功耗 proxy | 3.620 mW | 1024 条连续 score GEMV、有效 FP16 数据流、24,668 pin activities |
+| Gate-VCD 能量 / issued score GEMV command | ≈6.10 pJ | 1024 条连续 score GEMV + 16 次 vector setup write；24,668 pin activities；下界 |
 
 **功耗与时序限制：**
 
 1. ORFS/ASAP7 STA 的时间单位为 ps，因此 666 MHz SDC 使用 `1500 ps` 周期、50 ps setup uncertainty 和门控 derived clocks。旧版把 `1.500` 误当作 ns，实际被解释为 1.5 ps，旧 PPA 数值不可再用于时序或功耗比较。
-2. `5.177 mW` 是 vectorless 默认活动率，并非 workload 功耗。新增的 `3.620 mW` 来自与 ORFS 映射网表一致的 gate VCD：先写入 16 个 vector words，再以 II=1 发射 1024 条 score GEMV；输入是 16 组有限、正规 FP16 值而非全零/全一。OpenROAD 确认注释了 24,668 个 pin activities。由于该 gate-VCD 生成器的全内部、全结果观察版本超过本机内存限制，这个值仍是 standard-cell GEMV **动态 proxy/下界**，不含 PIM SRAM/DRAM、互连、输出消费者、CTS/route 寄生或真实 1z-nm 工艺。
+2. 默认活动率 `5.177 mW` 仅用于诊断，不在汇总表中作为可比指标。表中的 `≈6.10 pJ/score command` 由与 ORFS 映射网表一致的 `3.620143 mW` gate-VCD 平均功耗乘以 1,725 ns 仿真时窗、再除以 1024 条 issued score command 得到；该时窗还含 16 次 vector setup write。输入是有限、正规 FP16 值，OpenROAD 确认注释了 24,668 个 pin activities。由于 gate-VCD 生成器的全内部、全结果观察版本超过本机内存限制，这个值仍是 standard-cell GEMV **动态 proxy/下界**，不含 PIM SRAM/DRAM、互连、输出消费者、CTS/route 寄生或真实 1z-nm 工艺。
 3. 这也解释了为什么 VCD 数值可能低于 vectorless 数值：默认 activity 会对未注释网络施加统一翻转率，而本 workload 的实际位翻转受具体 FP16 数据分布与时钟门控限制；两者不能互相替代，也不能直接外推到数百个 Bank。
 4. 该 floorplan proxy 已通过 setup（187.32 ps slack），但 hold 仍有 10.38 ps 缺口；它不是 post-route/CTS 签核结论。
 
 ### 表 I：单元级 PPA 汇总（HPCA 风格）
 
 所有条目使用 ASAP7 TC 标准单元库和 1.500 ns（666.7 MHz）约束。面积为 `synth / floorplan`
-实例面积；`P_vec` 是 ORFS vectorless power proxy。
+实例面积；能耗列统一为与指令绑定的 `E_instr`，而不再把不同 workload 的平均功耗并列比较。
 
-| Unit | Function / configuration | Area (µm²) | Freq. target | `P_vec` (mW) | Timing proxy |
+| Unit | Function / configuration | Area (µm²) | Freq. target | `E_instr` (pJ) | Timing proxy |
 | --- | --- | ---: | ---: | ---: | --- |
-| Bank GEMV | FP16, 16× mul, 16× add, 4 accumulator slots | 9,106 / 9,210.74 | 666.7 MHz | 5.177 | setup +187.32 ps; hold −10.38 ps† |
-| Pseudo-channel Accumulation | FP16 16-lane collector, 4 slots, 4-stage add | 2,974.44 / 3,097.39 | 666.7 MHz | 13.799 | setup +166.24 ps; setup/hold TNS=0 |
-| Base-Die Vector | FP16 softmax + ReLU/SiLU, time-multiplexed pipeline | 1,711.41 / 1,794 | 666.7 MHz | 3.930 | setup +5.80 ps; setup/hold TNS=0 |
+| Bank GEMV | FP16, 16× mul, 16× add, 4 accumulator slots | 9,106 / 9,210.74 | 666.7 MHz | 9.71–10.54 / context command‡ | setup +187.32 ps; hold −10.38 ps† |
+| Pseudo-channel Accumulation | FP16 16-lane collector, 4 slots, 4-stage add | 2,974.44 / 3,097.39 | 666.7 MHz | 7.11 / partial update‡ | setup +166.24 ps; setup/hold TNS=0 |
+| Base-Die Vector | 16-lane FP16 softmax + ReLU/SiLU, parallel pipelines | 7,906.98 / 7,911 | 666.7 MHz | 129.28 / softmax tile; 32.81 / SiLU vector; 2.34 / ReLU vector | setup +685.80 ps; setup/hold TNS=0 |
 
 † GEMV 的 floorplan hold 尚有 10.38 ps 缺口，不能表述为 post-route/CTS 时序签核通过。
-所有 `P_vec` 均为工具默认活动率下的标准单元 proxy，不能直接相加、按 Bank 数外推或视为真实
-1z-nm/系统级功耗。
+‡ GEMV/Accumulation 为已测 FP16 原语和 state event 组合的能量模型；Vector 为当前 r6
+mapped-netlist gate-VCD 结果。它们都只是标准单元 proxy，不能直接相加、按 Bank 数外推或视为
+真实 1z-nm/系统级功耗。
 
 ### Base-Die 新增模块 PPA
 
 下表是 `rtl/melon_accumulation_unit.sv` 与 `rtl/melon_vector_unit.sv` 的独立测量，使用同一
 ASAP7 TC / 1.500 ns（666.7 MHz）约束。Accumulation 的 VCD 为 256 条遵守 `partial_ready` 的
-部分 GEMV 命令；当前 FP16 Vector 尚未用完整 softmax + ReLU/SiLU trace 重采 VCD。所有动态
+部分 GEMV 命令；当前并行 FP16 Vector 已用连续 softmax + ReLU/SiLU trace 重采 VCD。所有动态
 激励均应使用随 lane 和命令变化的有限、正规 FP16 输入，而非全零/全一激励。
 
-| 模块 | 算术/流水实现 | Synth logical area | Floorplan instance area | vectorless power proxy | 门级 VCD dynamic proxy | 666 MHz 时序 proxy |
-| --- | --- | ---: | ---: | ---: | ---: | --- |
-| Accumulation Unit | 16-lane FP16 partial-GEMV collector；4 slot；4-stage FP16 add | 2,974.44 µm² | 3,097.39 µm² | 13.799 mW | **14.501 mW**（5,594 annotated pins） | setup/hold TNS=0；adder gated-domain fmax 749.76 MHz，setup slack 166.24 ps |
-| Vector Unit | FP16 online-softmax + ReLU/SiLU；时分复用 FP16 add/mul pipeline | 1,711.41 µm² | 1,794 µm² | 3.930 mW | 尚未以新网表复测 | setup/hold TNS=0；vector gated-domain fmax 669.26 MHz，setup slack 5.80 ps |
+| 模块 | 算术/流水实现 | Synth logical area | Floorplan instance area | `E_instr`（pJ） | 666 MHz 时序 proxy |
+| --- | --- | ---: | ---: | ---: | --- |
+| Accumulation Unit | 16-lane FP16 partial-GEMV collector；4 slot；4-stage FP16 add | 2,974.44 µm² | 3,097.39 µm² | 7.11 / accepted partial update‡ | setup/hold TNS=0；adder gated-domain fmax 749.76 MHz，setup slack 166.24 ps |
+| Vector Unit | tile-width 并行：16 exp、16 reciprocal、16 sigmoid、16 mul；8/4/2/1 add tree | 7,906.98 µm² | 7,911 µm² | 129.28 / softmax tile；32.81 / SiLU vector；2.34 / ReLU vector | setup/hold TNS=0；vector gated-domain fmax 1,228.20 MHz，setup slack 685.80 ps |
 
-Accumulation 的门级 VCD 功耗由 internal `6.398 mW`、switching `8.102 mW`、leakage
-`0.002 mW` 组成。旧 Vector 的 `1.504 mW` 属于删除的 Q4 RTL，不能与当前 FP16 Vector
-混用；当前 FP16 版本的 `3.930 mW` 是 vectorless proxy，仍需实际 softmax/activation trace
-重测。所有这些数字均未包含 PIM memory macro、DRAM/封装互连、外部消费者、CTS/route 寄生或
-真实 1z-nm DRAM PDK。
+Accumulation 的 `7.11 pJ` 是 `16×e_add + e_psum` 的事件模型；其旧门级 VCD 平均功耗不再作为
+模块间比较列。旧 Vector 的 `1.504 mW` 属于删除的 Q4 RTL，不能与当前 FP16 Vector 混用；当前
+并行 FP16 版本的 `0.561 mW` 是 vectorless proxy。mapped-netlist VCD 已给出：连续
+online-softmax 为 **129.28 pJ/tile**（扣除 idle 基线），16-element SiLU 为
+**32.81 pJ/vector**，16-element ReLU 为 **2.34 pJ/vector**。这些是 ASAP7 standard-cell
+workload proxy，不能作为真实 PIM/DRAM 系统能耗或与旧串行版直接作能效比较；它们均未包含 PIM memory macro、DRAM/封装互连、外部消费者、CTS/route 寄生或真实 1z-nm DRAM PDK。
 
 完整接口、工作负载和测量复现步骤见 [Base-Die 模块文档](docs/melon_base_die_units.md)。
 对不同模块/工作负载如何计算可比的 `E/command` 与完整 trace 平均功耗，见
