@@ -73,6 +73,7 @@ docs/
   attacc_gemv_rtl_handoff.md # 完整中文交接、PPA 与限制说明
   melon_base_die_units.md    # Accumulation/Vector 接口、近似与独立 PPA
   fp16_arithmetic_microbench.md # 同 trace 的 FP16 Add vs. Mul+Add 功耗交叉验证
+  hierarchical_energy_model.md  # 以 trace 事件计数计算模块能耗的分层模型
 ```
 
 ## 顶层接口
@@ -204,6 +205,8 @@ Bank 数；它们均未包含 PIM memory macro、DRAM/封装互连、外部消�
 1z-nm DRAM PDK。Vector 的 `exp/div` 还采用 Q4 近似，不能表述为 IEEE-754 softmax 数值签核。
 
 完整接口、工作负载和测量复现步骤见 [Base-Die 模块文档](docs/melon_base_die_units.md)。
+对不同模块/工作负载如何计算可比的 `E/command` 与完整 trace 平均功耗，见
+[分层能耗模型](docs/hierarchical_energy_model.md)。
 
 ## 与论文的关系与边界
 
