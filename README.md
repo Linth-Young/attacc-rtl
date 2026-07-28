@@ -72,6 +72,7 @@ vivado/
 docs/
   attacc_gemv_rtl_handoff.md # 完整中文交接、PPA 与限制说明
   melon_base_die_units.md    # Accumulation/Vector 接口、近似与独立 PPA
+  fp16_arithmetic_microbench.md # 同 trace 的 FP16 Add vs. Mul+Add 功耗交叉验证
 ```
 
 ## 顶层接口

@@ -1,0 +1,7 @@
+create_clock -name core_clk -period 1500 [get_ports clk]
+create_generated_clock -name fp16_lane_gclk -source [get_ports clk] -divide_by 1 [get_nets -regexp {.*gclk.*}]
+set_clock_uncertainty -setup 50 [get_clocks core_clk]
+set_clock_uncertainty -hold 0 [get_clocks core_clk]
+set_clock_uncertainty -setup 50 [get_clocks fp16_lane_gclk]
+set_clock_uncertainty -hold 0 [get_clocks fp16_lane_gclk]
+set_false_path -from [get_ports rst_n]
