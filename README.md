@@ -169,6 +169,26 @@ podman run --rm --userns=keep-id \
 3. 这也解释了为什么 VCD 数值可能低于 vectorless 数值：默认 activity 会对未注释网络施加统一翻转率，而本 workload 的实际位翻转受具体 FP16 数据分布与时钟门控限制；两者不能互相替代，也不能直接外推到数百个 Bank。
 4. 该 floorplan proxy 已通过 setup（187.32 ps slack），但 hold 仍有 10.38 ps 缺口；它不是 post-route/CTS 签核结论。
 
+### Base-Die 新增模块 PPA
+
+下表是 `rtl/melon_accumulation_unit.sv` 与 `rtl/melon_vector_unit.sv` 的独立测量，使用同一
+ASAP7 TC / 1.500 ns（666.7 MHz）约束。Accumulation 的 VCD 为 256 条遵守 `partial_ready` 的
+部分 GEMV 命令；Vector 的 VCD 为 128 个遵守 `tile_ready` 的 online-softmax tile。两者均使用
+随 lane 和命令变化的有限、正规 FP16 输入，而非全零/全一激励。
+
+| 模块 | 算术/流水实现 | Synth logical area | Floorplan instance area | vectorless power proxy | 门级 VCD dynamic proxy | 666 MHz 时序 proxy |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Accumulation Unit | 16-lane FP16 partial-GEMV collector；4 slot；4-stage FP16 add | 2,974.44 µm² | 3,097.39 µm² | 13.799 mW | **14.501 mW**（5,594 annotated pins） | setup/hold TNS=0；adder gated-domain fmax 749.76 MHz，setup slack 166.24 ps |
+| Vector Unit | Q4 online-softmax；8-stage pipeline | 780.55 µm² | 823.25 µm² | 1.365 mW | **1.504 mW**（2,269 annotated pins） | setup/hold TNS=0；vector gated-domain fmax 1639.59 MHz，setup slack 890.09 ps |
+
+Accumulation 的门级 VCD 功耗由 internal `6.398 mW`、switching `8.102 mW`、leakage
+`0.002 mW` 组成；Vector 对应为 internal `0.979 mW`、switching `0.525 mW`、leakage
+`0.001 mW`。这些是标准单元动态 proxy，不能与上表的 GEMV VCD 数字混合、相加或直接乘以
+Bank 数；它们均未包含 PIM memory macro、DRAM/封装互连、外部消费者、CTS/route 寄生或真实
+1z-nm DRAM PDK。Vector 的 `exp/div` 还采用 Q4 近似，不能表述为 IEEE-754 softmax 数值签核。
+
+完整接口、工作负载和测量复现步骤见 [Base-Die 模块文档](docs/melon_base_die_units.md)。
+
 ## 与论文的关系与边界
 
 本实现对齐论文 GemV 的 16 multiplier / 16 adder 资源和 score/context 数据流，但以下内容不在范围内：
