@@ -3,10 +3,11 @@ ATTACC_RTL_HOME              := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..
 export PLATFORM                = asap7
 export CORNER                  = TC
 export DESIGN_NAME             = melon_vector_unit
-export DESIGN_NICKNAME         = melon_vector_unit_666mhz_fp16parallel_r9_headpipe
+export DESIGN_NICKNAME         = melon_vector_unit_666mhz_fp16parallel_r10_himath_shared
 export VERILOG_FILES           = \
   $(ATTACC_RTL_HOME)/rtl/attacc_fp16_pkg.sv \
   $(ATTACC_RTL_HOME)/rtl/attacc_fp16_operators.sv \
+  $(ATTACC_RTL_HOME)/rtl/attacc_fp16_math_hi.sv \
   $(ATTACC_RTL_HOME)/rtl/melon_vector_unit.sv
 export SDC_FILE                = $(ATTACC_RTL_HOME)/openroad/constraint_vector_unit_666mhz.sdc
 export PRE_FLOORPLAN_TCL       = $(ATTACC_RTL_HOME)/openroad/power_activity.tcl
@@ -20,7 +21,7 @@ export SYNTH_ARGS              = -noalumacc
 # ABC from constructing one monolithic Boolean network for the full 16-lane
 # Vector Unit while retaining every lane instance in the mapped netlist.
 export SYNTH_HIERARCHICAL      = 1
-export SYNTH_KEEP_MODULES      = attacc_fp16_add_fast_pipe attacc_fp16_exp_neg_pipe attacc_fp16_recip_pipe attacc_fp16_sigmoid_pipe attacc_fp16_mul_pipe
+export SYNTH_KEEP_MODULES      = attacc_fp16_add_pipe attacc_fp16_add_fast_pipe attacc_fp16_exp_neg_hi_pipe attacc_fp16_recip_hi_pipe attacc_fp16_mul_pipe
 export ADDER_MAP_FILE          =
 # The speed script is materially less memory-hungry than the area script for
 # a fully expanded FP16 lane array; it is still a mapped ASAP7 proxy result.

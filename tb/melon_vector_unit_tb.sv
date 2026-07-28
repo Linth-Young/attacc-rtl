@@ -55,6 +55,28 @@ module melon_vector_unit_tb;
     end
   endtask
 
+  task automatic send_silu;
+    begin
+      @(negedge clk);
+      while (!activation_ready) @(negedge clk);
+      activation_silu = 1'b1;
+      activation_valid = 1'b1;
+      @(negedge clk);
+      activation_valid = 1'b0;
+      activation_silu = 1'b0;
+    end
+  endtask
+
+  function automatic integer fp16_ulp_diff(input logic [15:0] a,
+                                           input logic [15:0] b);
+    integer oa, ob;
+    begin
+      oa = a[15] ? (16'h8000 - a) : (16'h8000 + a);
+      ob = b[15] ? (16'h8000 - b) : (16'h8000 + b);
+      fp16_ulp_diff = (oa > ob) ? (oa - ob) : (ob - oa);
+    end
+  endfunction
+
   initial begin
     state_reset = 0; tile_valid = 0; tile_last = 0; tile_head_id = '0; tile_state_reset = 0; score_data = '0;
     activation_valid = 0; activation_silu = 0; activation_data = '0;
@@ -126,6 +148,15 @@ module melon_vector_unit_tb;
     if (!activation_out_valid || activation_result[0 +: 16] != 16'h0000 ||
         activation_result[16 +: 16] != 16'h4000)
       $fatal(1, "ReLU failed: lane0=%h lane1=%h", activation_result[0 +: 16], activation_result[16 +: 16]);
+
+    send_silu();
+    wait (activation_ack);
+    #0.1;
+    if (!activation_out_valid ||
+        fp16_ulp_diff(activation_result[0 +: 16], 16'hb44e) > 2 ||
+        fp16_ulp_diff(activation_result[16 +: 16], 16'h3f0c) > 2)
+      $fatal(1, "SiLU failed: lane0=%h lane1=%h",
+             activation_result[0 +: 16], activation_result[16 +: 16]);
 
     $display("melon_vector_unit_tb PASS");
     $finish;

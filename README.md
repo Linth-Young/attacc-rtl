@@ -56,12 +56,13 @@ ACC: 1 + sum  : adder 15
 rtl/
   attacc_gemv_unit.sv        # 顶层 GemV、双缓冲、时钟门控、流式控制
   attacc_fp16_operators.sv   # 2-stage multiplier、4-stage adder pipeline
+  attacc_fp16_math_hi.sv     # 推理级高精度 FP16 exp/reciprocal pipeline
   attacc_fp16_pkg.sv         # 组合 FP16 参考函数
   melon_accumulation_unit.sv # pseudo-channel 16-lane partial-GEMV collector
   melon_vector_unit.sv       # Base-Die FP16 online-softmax + ReLU/SiLU Vector Unit
 tb/
   attacc_gemv_unit_tb.sv     # score/context/II=1 score stream 测试
-  melon_vector_unit_tb.sv    # FP16 softmax state 与 ReLU 功能测试
+  melon_vector_unit_tb.sv    # FP16 softmax state、ReLU 与 SiLU 功能测试
   openroad_clkgate_sim.sv    # 仿真用 OPENROAD_CLKGATE 功能模型
   vcd_activity.py            # VCD 全局翻转率辅助统计
 openroad/
@@ -180,10 +181,10 @@ podman run --rm --userns=keep-id \
 | --- | --- | ---: | ---: | ---: | --- |
 | Bank GEMV | FP16, 16× mul, 16× add, 4 accumulator slots | 9,106 / 9,210.74 | 666.7 MHz | 9.71–10.54 / context command‡ | setup +187.32 ps; hold −10.38 ps† |
 | Pseudo-channel Accumulation | FP16 16-lane collector, 4 slots, 4-stage add | 2,974.44 / 3,097.39 | 666.7 MHz | 7.11 / partial update‡ | setup +166.24 ps; setup/hold TNS=0 |
-| Base-Die Vector | 16-lane FP16 softmax + ReLU/SiLU, 32-head tagged II=1 pipeline | 10,153.25 / 10,598 | 666.7 MHz | 34.23 / softmax tile | setup +512.87 ps; setup TNS=0 |
+| Base-Die Vector | 16-lane FP16 softmax + ReLU/SiLU；共享高精度 exp/reciprocal；32-head tagged II=1 | 19,138.87 / 19,672 | 666.7 MHz | 394.31 / softmax tile | setup +1.28 ps; setup TNS=0 |
 
 † GEMV 的 floorplan hold 尚有 10.38 ps 缺口，不能表述为 post-route/CTS 时序签核通过。
-‡ GEMV/Accumulation 为已测 FP16 原语和 state event 组合的能量模型；Vector 为当前 r9
+‡ GEMV/Accumulation 为已测 FP16 原语和 state event 组合的能量模型；Vector 为当前 r10
 32-head II=1 mapped-netlist gate-VCD 的 idle 扣除结果。它们都只是标准单元 proxy，不能直接相加、按 Bank 数外推或视为
 真实 1z-nm/系统级功耗。
 
@@ -197,15 +198,16 @@ ASAP7 TC / 1.500 ns（666.7 MHz）约束。Accumulation 的 VCD 为 256 条遵�
 | 模块 | 算术/流水实现 | Synth logical area | Floorplan instance area | `E_instr`（pJ） | 666 MHz 时序 proxy |
 | --- | --- | ---: | ---: | ---: | --- |
 | Accumulation Unit | 16-lane FP16 partial-GEMV collector；4 slot；4-stage FP16 add | 2,974.44 µm² | 3,097.39 µm² | 7.11 / accepted partial update‡ | setup/hold TNS=0；adder gated-domain fmax 749.76 MHz，setup slack 166.24 ps |
-| Vector Unit | tile-width 并行：16 exp、16 reciprocal、16 sigmoid、16 mul；8/4/2/1 add tree；32-head tagged II=1 pipeline | 10,153.25 µm² | 10,598 µm² | 34.23 / softmax tile | setup TNS=0；vector gated-domain fmax 1,013.04 MHz，setup slack 512.87 ps |
+| Vector Unit | 16 个共享 softmax/SiLU 的高精度 exp lane + 1 个 rescale exp；4 个共享 reciprocal lane；16 个复用 mul；8/4/2/1 add tree；32-head II=1 | 19,138.87 µm² | 19,672 µm² | 394.31 / softmax tile；1,222.79 / SiLU vector | setup TNS=0；vector gated-domain fmax 667.24 MHz，setup slack 1.28 ps |
 
 Accumulation 的 `7.11 pJ` 是 `16×e_add + e_psum` 的事件模型；其旧门级 VCD 平均功耗不再作为
 模块间比较列。旧 Vector 的 `1.504 mW` 属于删除的 Q4 RTL，不能与当前 FP16 Vector 混用。
-当前 r9 以 32 个 head 轮转连续发射 128 个 online-softmax tile，mapped-netlist VCD 得到
-`15.51548 mW` active、`0.303787 mW` idle；288.002 ns 时窗下换算为
-**34.91 pJ/tile**（含基线）或 **34.23 pJ/tile**（扣除 idle）。r8 的
+当前 r10 以 32 个 head 轮转连续发射 128 个 online-softmax tile，mapped-netlist VCD 得到
+`175.607 mW` active、`0.357349 mW` idle；288.002 ns 时窗下换算为
+**395.12 pJ/tile**（含基线）或 **394.31 pJ/tile**（扣除 idle）。12 条 SiLU vector
+指令的 384.002 ns trace 为 `38.56936 mW`，对应 **1,222.79 pJ/vector** 增量能量。r8 的
 `128.74 pJ/tile` 来自单 tile 控制器的稀疏四指令 trace，不应再代表当前吞吐模式；旧 r8
-SiLU/ReLU 能量也不列入当前 r9 汇总表。这些是 ASAP7 standard-cell
+SiLU/ReLU 能量也不能与当前 r10 混用。这些是 ASAP7 standard-cell
 workload proxy，不能作为真实 PIM/DRAM 系统能耗或与旧串行版直接作能效比较；它们均未包含 PIM memory macro、DRAM/封装互连、外部消费者、CTS/route 寄生或真实 1z-nm DRAM PDK。
 
 完整接口、工作负载和测量复现步骤见 [Base-Die 模块文档](docs/melon_base_die_units.md)。
