@@ -58,9 +58,10 @@ rtl/
   attacc_fp16_operators.sv   # 2-stage multiplier、4-stage adder pipeline
   attacc_fp16_pkg.sv         # 组合 FP16 参考函数
   melon_accumulation_unit.sv # pseudo-channel 16-lane partial-GEMV collector
-  melon_vector_unit.sv       # Base-Die online-softmax Q4 Vector Unit
+  melon_vector_unit.sv       # Base-Die FP16 online-softmax + ReLU/SiLU Vector Unit
 tb/
   attacc_gemv_unit_tb.sv     # score/context/II=1 score stream 测试
+  melon_vector_unit_tb.sv    # FP16 softmax state 与 ReLU 功能测试
   openroad_clkgate_sim.sv    # 仿真用 OPENROAD_CLKGATE 功能模型
   vcd_activity.py            # VCD 全局翻转率辅助统计
 openroad/
@@ -180,7 +181,7 @@ podman run --rm --userns=keep-id \
 | --- | --- | ---: | ---: | ---: | --- |
 | Bank GEMV | FP16, 16× mul, 16× add, 4 accumulator slots | 9,106 / 9,210.74 | 666.7 MHz | 5.177 | setup +187.32 ps; hold −10.38 ps† |
 | Pseudo-channel Accumulation | FP16 16-lane collector, 4 slots, 4-stage add | 2,974.44 / 3,097.39 | 666.7 MHz | 13.799 | setup +166.24 ps; setup/hold TNS=0 |
-| Base-Die Vector | Q4 online-softmax, 8-stage pipeline | 780.55 / 823.25 | 666.7 MHz | 1.365 | setup +890.09 ps; setup/hold TNS=0 |
+| Base-Die Vector | FP16 softmax + ReLU/SiLU, time-multiplexed pipeline | 1,711.41 / 1,794 | 666.7 MHz | 3.930 | setup +5.80 ps; setup/hold TNS=0 |
 
 † GEMV 的 floorplan hold 尚有 10.38 ps 缺口，不能表述为 post-route/CTS 时序签核通过。
 所有 `P_vec` 均为工具默认活动率下的标准单元 proxy，不能直接相加、按 Bank 数外推或视为真实
@@ -190,19 +191,19 @@ podman run --rm --userns=keep-id \
 
 下表是 `rtl/melon_accumulation_unit.sv` 与 `rtl/melon_vector_unit.sv` 的独立测量，使用同一
 ASAP7 TC / 1.500 ns（666.7 MHz）约束。Accumulation 的 VCD 为 256 条遵守 `partial_ready` 的
-部分 GEMV 命令；Vector 的 VCD 为 128 个遵守 `tile_ready` 的 online-softmax tile。两者均使用
-随 lane 和命令变化的有限、正规 FP16 输入，而非全零/全一激励。
+部分 GEMV 命令；当前 FP16 Vector 尚未用完整 softmax + ReLU/SiLU trace 重采 VCD。所有动态
+激励均应使用随 lane 和命令变化的有限、正规 FP16 输入，而非全零/全一激励。
 
 | 模块 | 算术/流水实现 | Synth logical area | Floorplan instance area | vectorless power proxy | 门级 VCD dynamic proxy | 666 MHz 时序 proxy |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Accumulation Unit | 16-lane FP16 partial-GEMV collector；4 slot；4-stage FP16 add | 2,974.44 µm² | 3,097.39 µm² | 13.799 mW | **14.501 mW**（5,594 annotated pins） | setup/hold TNS=0；adder gated-domain fmax 749.76 MHz，setup slack 166.24 ps |
-| Vector Unit | Q4 online-softmax；8-stage pipeline | 780.55 µm² | 823.25 µm² | 1.365 mW | **1.504 mW**（2,269 annotated pins） | setup/hold TNS=0；vector gated-domain fmax 1639.59 MHz，setup slack 890.09 ps |
+| Vector Unit | FP16 online-softmax + ReLU/SiLU；时分复用 FP16 add/mul pipeline | 1,711.41 µm² | 1,794 µm² | 3.930 mW | 尚未以新网表复测 | setup/hold TNS=0；vector gated-domain fmax 669.26 MHz，setup slack 5.80 ps |
 
 Accumulation 的门级 VCD 功耗由 internal `6.398 mW`、switching `8.102 mW`、leakage
-`0.002 mW` 组成；Vector 对应为 internal `0.979 mW`、switching `0.525 mW`、leakage
-`0.001 mW`。这些是标准单元动态 proxy，不能与上表的 GEMV VCD 数字混合、相加或直接乘以
-Bank 数；它们均未包含 PIM memory macro、DRAM/封装互连、外部消费者、CTS/route 寄生或真实
-1z-nm DRAM PDK。Vector 的 `exp/div` 还采用 Q4 近似，不能表述为 IEEE-754 softmax 数值签核。
+`0.002 mW` 组成。旧 Vector 的 `1.504 mW` 属于删除的 Q4 RTL，不能与当前 FP16 Vector
+混用；当前 FP16 版本的 `3.930 mW` 是 vectorless proxy，仍需实际 softmax/activation trace
+重测。所有这些数字均未包含 PIM memory macro、DRAM/封装互连、外部消费者、CTS/route 寄生或
+真实 1z-nm DRAM PDK。
 
 完整接口、工作负载和测量复现步骤见 [Base-Die 模块文档](docs/melon_base_die_units.md)。
 对不同模块/工作负载如何计算可比的 `E/command` 与完整 trace 平均功耗，见

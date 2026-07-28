@@ -2,9 +2,10 @@
 export PLATFORM                = asap7
 export CORNER                  = TC
 export DESIGN_NAME             = melon_vector_unit
-export DESIGN_NICKNAME         = melon_vector_unit_666mhz_q4_pipe8_666m_r1
+export DESIGN_NICKNAME         = melon_vector_unit_666mhz_fp16act_pipe_r1
 export VERILOG_FILES           = \
   $(abspath rtl/attacc_fp16_pkg.sv) \
+  $(abspath rtl/attacc_fp16_operators.sv) \
   $(abspath rtl/melon_vector_unit.sv)
 export SDC_FILE                = $(abspath openroad/constraint_vector_unit_666mhz.sdc)
 export PRE_FLOORPLAN_TCL       = $(abspath openroad/power_activity.tcl)
@@ -20,5 +21,5 @@ export PLACE_DENSITY           = 0.65
 export TNS_END_PERCENT         = 100
 export GPL_TIMING_DRIVEN       = 0
 export GPL_ROUTABILITY_DRIVEN  = 0
-# The Q4 datapath is explicitly split into max/exp/reduce/state stages; keep
-# default floorplan timing repair enabled for the 666 MHz proxy check.
+# FP16 add/mul pipelines isolate the arithmetic critical paths. Keep default
+# floorplan timing repair enabled for the 666 MHz proxy check.

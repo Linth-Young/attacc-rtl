@@ -12,11 +12,11 @@
 
 ## Vector Unit
 
-`rtl/melon_vector_unit.sv` 实现 score tile 的 online-softmax 协议：FP16 比较树产生 `tile_max`，状态缓冲保存 `state_max` 与归一化和；输出逐 lane `weight_data`、给 Bank PIM 的 `bank_rescale`、`normalizer_recip`，并在状态提交时置位 `tile_ack`。`tile_last` 对应一个 sequence 的完成通知。
+`rtl/melon_vector_unit.sv` 现在实现论文所述的 FP16 Vector Unit：FP16 比较树产生 `tile_max`，FP16 state buffer 保存 `state_max/state_sum`，并输出逐 lane `weight_data`、给 Bank PIM 的 `bank_rescale` 与 `normalizer_recip`。`tile_ack` 仅在状态写回后置位，`tile_last` 对应 sequence 完成通知。
 
-为满足 666 MHz，数据路径切成八拍：4 级 max tree、1 级 exp/旧状态缩放、3 级加法树与 state commit。只保存一份输入 tile；因 online softmax 的状态依赖，下一 tile 在 commit 后由 `tile_ready` 接收，固定延迟/安全 issue interval 都是 8 拍。所有在途寄存器由一个工作时钟门控，空闲时不翻转。
+由于论文未给出 exponent/divider/sigmoid 的内部近似公式，本实现以 FP16 输入/输出的单调 LUT 实现 `exp`、reciprocal 和 sigmoid；`state_sum`、加法、乘法及所有接口均为 binary16，**不再含 Q4 状态或 Q4-to-FP16 转换**。若拿到工艺库的 FP16 transcendental macro，可只替换三个 LUT 函数而不改变端口与 online-softmax 协议。
 
-为控制面积，FP16 比较和 max state 是精确的，而 `exp` 与 `divide` 是可综合 Q4 近似：exp 值只取 `{1, .75, .5, .25, .125}`，归一化和保存为 Q4，倒数和 Q4-to-FP16 转换只保留指数。这是一个低面积协议/控制基线，不是数值等价的 IEEE-754 `exp/div`。若需要模型精度结论，应替换 `exp_q_approx`、`weight_to_fp16`、`q_to_fp16` 与 `recip_q_to_fp16`，然后用真实 attention trace 重新验证。
+为满足 666 MHz 且控制 Base-Die 面积，16-lane tile 先经 3 级 FP16 comparator tree，再由一个 4-stage FP16 delta adder、一个 4-stage FP16 reducer 和一个 2-stage FP16 multiplier 时分复用完成 exponent、state rescale、normalizer 累加与最终合并。在线状态相关使 `tile_ready` 仅在提交后拉高；这牺牲 tile 吞吐以换取低面积。新增 activation 命令接口支持 elementwise ReLU 和 SiLU，SiLU 使用 FP16 sigmoid LUT 后送入同一 FP16 multiplier。它是论文功能/数值格式对齐的面积优先实现，不是论文未公开的完整并行电路网表。
 
 ## 验证
 
@@ -33,25 +33,28 @@ xelab -top melon_vector_unit
 
 `tb/melon_accumulation_unit_tb.sv` 额外覆盖两个 slot 连续完成，以及同一 slot 的 FP16 `1.0 + 2.0 = 3.0`。本机 Vivado 对该 testbench 的 `xvlog/xelab` 已通过；XSim 在启动 Tcl 阶段出现环境异常、未进入仿真，因而不将其标记为动态仿真通过。
 
+`tb/melon_vector_unit_tb.sv` 覆盖全零 score tile 的 FP16 online-softmax state（`sum=16.0`、reciprocal=`1/16`）和 ReLU 的负值截断/正值直通。FP16 Vector 及其 gate-activity wrapper 已通过本机 Vivado `xvlog` 静态编译；XSim 在同一环境的 Tcl 启动阶段异常退出，因此动态 testbench 结果同样不标为通过。
+
 门级活动测试分别由 `tb/melon_accumulation_gate_activity_wrapper.sv` 与
-`tb/melon_vector_gate_activity_wrapper.sv` 产生。前者以 `partial_ready` 为准发送 256 条
-部分 GEMV 命令，轮换 slot 并执行 clear/accumulate/last；后者以 `tile_ready` 为准发送
-128 个 online-softmax tile，保留 8 拍状态依赖。两者均使用有限、正规且随命令/lanes 变化的
-FP16 数据，避免以全零/全一输入估计动态功耗。
+`tb/melon_vector_gate_activity_wrapper.sv` 可产生 Vector 的 online-softmax 流；前者以
+`partial_ready` 为准发送 256 条部分 GEMV 命令，轮换 slot 并执行 clear/accumulate/last。
+旧 Q4 Vector 的 128-tile VCD 不再适用；当前 FP16 Vector 必须按其较长的 `tile_ready`
+间隔并加入 ReLU/SiLU command trace 后重新采样。激励均使用随 lane/命令变化的有限、正规
+FP16 数据，避免全零/全一输入估计动态功耗。
 
 ## ASAP7 TC OpenROAD proxy PPA
 
-约束均为 1.500 ns（666.7 MHz 目标），库为 ASAP7 TC，结果路径分别在 `reports/asap7/melon_accumulation_666mhz_gatedctrl/` 和 `reports/asap7/melon_vector_unit_666mhz_q4_pipe8_666m_r1/`。该 ORFS/ASAP7 flow 的 STA 单位为 ps，故 SDC 使用 `1500 ps` 周期、`50 ps` setup uncertainty 与 floorplan 阶段的 `0 ps` hold uncertainty；门控输出均声明为 generated clock。面积是标准单元 proxy，不是 1z-nm DRAM PDK 面积。
+约束均为 1.500 ns（666.7 MHz 目标），库为 ASAP7 TC，结果路径分别在 `reports/asap7/melon_accumulation_666mhz_gatedctrl/` 和 `reports/asap7/melon_vector_unit_666mhz_fp16act_pipe_r1/`。该 ORFS/ASAP7 flow 的 STA 单位为 ps，故 SDC 使用 `1500 ps` 周期、`50 ps` setup uncertainty 与 floorplan 阶段的 `0 ps` hold uncertainty；门控输出均声明为 generated clock。面积是标准单元 proxy，不是 1z-nm DRAM PDK 面积。
 
 | 单元 | Synth logical area | Floorplan instance area | vectorless power | 门级 VCD dynamic proxy | timing 指标 |
 | --- | ---: | ---: | ---: | ---: | --- |
 | Accumulation Unit（controller clock-gated） | 2,974.44 µm² | 3,097.39 µm² | 13.799 mW | **14.501 mW**（5,594 pins） | setup/hold TNS=0；adder gated-domain fmax 749.76 MHz，setup slack 166.24 ps |
-| Vector Unit（Q4，8-stage pipelined） | 780.55 µm² | 823.25 µm² | 1.365 mW | **1.504 mW**（2,269 pins） | setup/hold TNS=0；vector gated-domain fmax 1639.59 MHz，setup slack 890.09 ps |
+| Vector Unit（FP16 softmax + ReLU/SiLU，时分复用） | 1,711.41 µm² | 1,794 µm² | 3.930 mW | 尚未以新网表复测 | setup/hold TNS=0；vector gated-domain fmax 669.26 MHz，setup slack 5.80 ps |
 
-新列由同一 mapped netlist 的 zero-delay functional gate simulation VCD 回标到已有 floorplan
-ODB：Accumulation 为 internal `6.397662 mW`、switching `8.101760 mW`、leakage
-`0.001721 mW`；Vector 为 internal `0.978613 mW`、switching `0.524618 mW`、leakage
-`0.000662 mW`。日志均报告非零注释活动，因此不再是 vectorless 数字。
+Accumulation 的门级 VCD 来自同一 mapped netlist 的 zero-delay functional gate simulation
+回标：internal `6.397662 mW`、switching `8.101760 mW`、leakage `0.001721 mW`。旧 Vector
+的 `1.504 mW` 是已删除 Q4 设计的结果，不能用于当前 FP16 RTL；当前 `3.930 mW` 仅为
+ORFS vectorless proxy，须使用支持长 tile 间隔的真实 softmax/activation trace 重采 VCD。
 
 不过这仍是 666 MHz ASAP7 standard-cell **动态 proxy**，不能直接乘以 Bank 数得到系统功耗。
 它没有 PIM SRAM/DRAM macro、封装/互连、外部结果消费者、CTS/布线寄生、IR/EM 或 1z-nm
@@ -71,5 +74,5 @@ podman run --rm --userns=keep-id -v "$PWD":/work/attacc-rtl -w /work/attacc-rtl 
   DESIGN_CONFIG=openroad/config_vector_unit.mk floorplan
 ```
 
-下一步是在 post-route/CTS 后以真实时钟树复核 hold，并用带实际 attention trace 和外部
-结果消费者的 SAIF/VCD 复测；若需要更高 softmax 数值精度，再替换 Q4 exp/div 近似。
+下一步是在 post-route/CTS 后以真实时钟树复核 hold，并用带实际 attention trace、activation
+命令和外部结果消费者的 SAIF/VCD 复测；若有目标库的 math macro，再替换 FP16 LUT math 单元。
